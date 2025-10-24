@@ -1,0 +1,277 @@
+// example_testbench.cpp - Example using the veroutines library
+#include <format>
+#include <iostream>
+#include "verilated.h"
+#include "verilated_vcd_c.h"
+#include "Vaxibox.h"
+#include "veroutines.h"
+
+using std::cout;
+using std::format;
+using namespace veroutines;
+
+// Clock generator veroutine
+Veroutine clock_generator(Vaxibox* dut, size_t max_cycles = 1000) {
+    for (size_t i = 0; i < max_cycles; i++) {
+        dut->clk = 0;
+        co_await clock_cycles(1);
+        dut->clk = 1;
+        co_await clock_cycles(1);
+    }
+}
+
+// rst sequence
+Veroutine rst_sequence(Vaxibox* dut) {
+    cout << "[rst] Asserting rst...\n";
+    dut->rst = 1;
+    co_await clock_cycles(10);
+    
+    cout << "[rst] Deasserting rst...\n";
+    dut->rst = 0;
+    co_await clock_cycles(5);
+    
+    cout << "[rst] Complete\n";
+}
+
+// AXI Stream driver
+Veroutine axi_stream_driver(Vaxibox* dut) {
+    // Wait for rst to complete
+    co_await until([dut]{ return !dut->rst; });
+    co_await clock_cycles(10);  // Additional settling time
+    
+    cout << "[Driver] Starting AXI stream transactions...\n";
+    
+    for (int i = 0; i < 10; i++) {
+        cout << format("[Driver] Sending transaction {}\n", i);
+        
+        // Send data
+        dut->s_tdata = i * 0x10;
+        dut->s_tvalid = 1;
+        
+        // Wait for slave ready with timeout
+        bool success = co_await timeout([dut]{ return dut->s_tready; }, 100);
+        
+        if (!success) {
+            cout << format("[Driver] Transaction {} timed out!\n", i);
+            dut->s_tvalid = 0;
+            break;
+        }
+        
+        // Hold for handshake
+        co_await clock_cycles(1);
+        
+        // Deassert valid
+        dut->s_tvalid = 0;
+        
+        // Gap between transactions
+        co_await clock_cycles(5);
+    }
+    
+    cout << "[Driver] Complete\n";
+}
+
+// Monitor output transactions
+Veroutine output_monitor(Vaxibox* dut) {
+    int transaction_count = 0;
+    
+    cout << "[Monitor] Starting...\n";
+    
+    // Monitor for up to 500 cycles
+    for (int cycle = 0; cycle < 500; cycle++) {
+        // Wait for valid signal rising edge
+        co_await rising_edge([dut]{ return dut->m_tvalid; });
+        
+        cout << format("[Monitor] Transaction {} detected, data=0x{:04x}\n", 
+                      transaction_count, dut->m_tdata);
+        
+        // Wait for handshake completion
+        bool handshake = co_await timeout(
+            [dut]{ return dut->m_tvalid && dut->m_tready; }, 
+            10
+        );
+        
+        if (handshake) {
+            transaction_count++;
+            cout << format("[Monitor] Transaction {} completed\n", transaction_count);
+        } else {
+            cout << "[Monitor] Handshake timeout\n";
+        }
+        
+        if (transaction_count >= 10) break;
+    }
+    
+    cout << format("[Monitor] Complete - observed {} transactions\n", transaction_count);
+}
+
+// Ready signal driver (randomized)
+Veroutine ready_driver(Vaxibox* dut) {
+    co_await clock_cycles(20);  // Initial delay
+    
+    cout << "[Ready] Starting random ready generation\n";
+    
+    for (int i = 0; i < 100; i++) {
+        dut->m_tready = (rand() % 100) > 30;  // 70% chance of ready
+        co_await clock_cycles(1 + rand() % 5);
+    }
+    
+    // Keep ready asserted at the end
+    dut->m_tready = 1;
+    cout << "[Ready] Complete\n";
+}
+
+// Parallel initialization tasks
+Veroutine config_task(Vaxibox* dut) {
+    cout << "  [Config] Starting\n";
+    co_await clock_cycles(10);
+    co_await clock_cycles(10);
+    cout << "  [Config] Done\n";
+}
+
+Veroutine memory_init_task(Vaxibox* dut) {
+    cout << "  [Memory] Starting\n";
+    for (int i = 0; i < 8; i++) {
+        // Simulate memory writes
+        co_await clock_cycles(2);
+    }
+    cout << "  [Memory] Done\n";
+}
+
+Veroutine calibration_task(Vaxibox* dut) {
+    cout << "  [Calibration] Starting\n";
+    co_await clock_cycles(1);
+    cout << "  [Calibration] Done\n";
+}
+
+// Parallel initialization sequence
+Veroutine parallel_init(Vaxibox* dut) {
+    cout << "[Init] Starting parallel initialization...\n";
+    
+    // Run multiple init tasks in parallel
+    co_await parallel()
+        .add(config_task(dut))
+        .add(memory_init_task(dut))
+        .add(calibration_task(dut));
+    
+    cout << "[Init] All parallel tasks complete!\n";
+}
+
+// Main test sequence - orchestrates everything
+Veroutine main_test(Vaxibox* dut) {
+    cout << "\n=== Main Test Sequence ===\n";
+    
+    // Sequential phases - use fork_join with single task to wait for completion
+    co_await fork_join().add(parallel_init(dut));  // Wait for init to complete
+    co_await fork_join().add(rst_sequence(dut));  // Then rst
+    
+    // Concurrent test phase - driver, monitor, and ready run in parallel
+    cout << "\n[Test] Starting concurrent phase...\n";
+    co_await parallel()
+        .add(axi_stream_driver(dut))
+        .add(output_monitor(dut))
+        .add(ready_driver(dut));
+    
+    cout << "\n=== Test Complete ===\n";
+}
+
+// Performance monitor - runs continuously in background
+Veroutine performance_monitor(Vaxibox* dut) {
+    size_t total_transactions = 0;
+    size_t start = 0;
+    bool started = false;
+    
+    cout << "[Perf] Monitor started\n";
+    
+    while (true) {
+        // Count completed transactions
+        co_await rising_edge([dut]{ return dut->m_tvalid && dut->m_tready; });
+        total_transactions++;
+        
+        if (!started) {
+            co_await clock_cycles(1);  // Get cycle count after first transaction
+            started = true;
+            start = 0;  // rst counter
+        }
+        
+        // Report every 50 cycles
+        if (start > 0 && start % 50 == 0) {
+            double throughput = (double)total_transactions / start;
+            cout << format("[Perf] Throughput: {:.3f} trans/cycle\n", throughput);
+        }
+        
+        start++;
+        
+        // Exit after enough cycles
+        if (start > 300) break;
+    }
+    
+    cout << format("[Perf] Final: {} transactions\n", total_transactions);
+}
+
+int main(int argc, char** argv) {
+    // Verilator setup
+    Verilated::mkdir("logs");
+    const auto contextp = std::make_unique<VerilatedContext>();
+    const auto tfp = std::make_unique<VerilatedVcdC>();
+    const auto dut = std::make_unique<Vaxibox>(contextp.get(), "");
+
+    //contextp->randrst(2);
+    contextp->traceEverOn(true);
+    contextp->commandArgs(argc, argv);
+
+    dut->trace(tfp.get(), 99);
+    tfp->open("logs/dump.vcd");
+    
+    if (!tfp->isOpen()) {
+        cout << "Failed to open VCD file\n";
+        return EXIT_FAILURE;
+    }
+
+    cout << "=== Veroutines Testbench ===\n";
+    cout << "Simulating DUT: Vaxibox\n\n";
+
+    // Create scheduler
+    Scheduler sched;
+    
+    // Spawn all veroutines
+    sched.spawn(clock_generator(dut.get(), 500));  // Clock for 500 cycles
+    sched.spawn(main_test(dut.get()));              // Main test sequence
+    sched.spawn(performance_monitor(dut.get()));    // Background monitor
+    
+    // Main simulation loop
+    size_t max_cycles = 1000;
+    size_t time_step = 5;  // 5 time units per cycle (for 100MHz clock @ 1ns resolution)
+    
+    while (sched.has_active() && sched.cycle() < max_cycles && !contextp->gotFinish()) {
+        // Advance simulation time
+        contextp->timeInc(time_step);
+        
+        // Tick scheduler - this runs all veroutines
+        sched.tick();
+        
+        // Evaluate DUT
+        dut->eval();
+        
+        // Dump waveform
+        tfp->dump(contextp->time());
+    }
+    
+    // Report completion
+    cout << format("\n=== Simulation Complete ===\n");
+    cout << format("Total cycles: {}\n", sched.cycle());
+    cout << format("Simulation time: {} ns\n", contextp->time());
+    
+    if (sched.cycle() >= max_cycles) {
+        cout << "Stopped: Reached maximum cycle count\n";
+    } else if (!sched.has_active()) {
+        cout << "Stopped: All veroutines completed\n";
+    } else {
+        cout << "Stopped: User termination\n";
+    }
+    
+    // Cleanup
+    dut->final();
+    tfp->close();
+    contextp->statsPrintSummary();
+    
+    return 0;
+}
