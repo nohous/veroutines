@@ -1,3 +1,5 @@
 verilator_out/**
 obj_dir/**
 logs/**
+.cache/**
+compile_commands.json

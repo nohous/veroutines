@@ -1,0 +1,16 @@
+{
+    "configurations": [
+        {
+            "name": "verilate",
+            "includePath": [
+                "src",
+                "verilator_out",
+                "/home/nohous/src/verilator/include"
+            ],
+            "intelliSenseMode": "linux-gcc-x64",
+            "cStandard": "c17",
+            "cppStandard": "gnu++20"
+        }
+    ],
+    "version": 4
+}

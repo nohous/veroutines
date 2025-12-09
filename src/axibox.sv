@@ -26,8 +26,10 @@ assign event_out = event_signal;
 always_ff @(posedge clk) begin: bitreverse
 
     if(!m_tvalid || m_tready) begin
-        for (int i = 0; i < $bits(s_tdata); i++) 
-            m_tdata[i] <= s_tdata[$bits(s_tdata) - i - 1];
+        /*for (int i = 0; i < $bits(s_tdata); i++) 
+            m_tdata[i] <= s_tdata[$bits(s_tdata) - i - 1];*/
+        m_tdata <= s_tdata;
+
         m_tvalid <= s_tvalid;
         if (s_tvalid) begin 
             if (cntr == 3) begin
@@ -54,15 +56,15 @@ always begin
 end
 
 always @(event_signal) begin
-    $display("event_signal");
+    $display("event_signal?");
 end
 
-always begin
+/*always begin
     #10;
     m_tvalid <= 1;
     #20;
     wait(0);
-end
+end*/
 
     
 endmodule

@@ -1,225 +1,216 @@
-#include <queue>
+#pragma once
+
 #include <vector>
-#include <unordered_map>
+#include <queue>
 #include <functional>
-#include <memory>
 #include <cstdint>
+#include <memory>
+#include <iostream>
+#include <verilated.h>
 
-// Base class for type erasure
-class SignalTracker {
+namespace Veroutines {
+
+// ============================================================================
+// Signal Handle and Template Implementation (Unchanged)
+// ============================================================================
+class SignalBase {
+    std::vector<size_t> dependent_processes_;
 public:
-    virtual ~SignalTracker() = default;
-    virtual void sample() = 0;
+    virtual ~SignalBase() = default;
+    virtual void snapshot() = 0;
     virtual bool changed() const = 0;
+    void add_dependency(size_t process_id) { dependent_processes_.push_back(process_id); }
+    const std::vector<size_t>& get_dependents() const { return dependent_processes_; }
 };
 
-// Templated implementation for specific signal types
-template<typename T>
-class TypedSignalTracker : public SignalTracker {
-    T* signal_ptr_;
-    T prev_value_;
-    T curr_value_;
-    
+template <typename T>
+class Signal : public SignalBase {
+    T* ptr_;
+    T  prev_val_;
+    T  curr_val_;
 public:
-    explicit TypedSignalTracker(T* ptr) 
-        : signal_ptr_(ptr)
-        , prev_value_(*ptr)
-        , curr_value_(*ptr) {}
-    
-    void sample() override {
-        prev_value_ = curr_value_;
-        curr_value_ = *signal_ptr_;
+    explicit Signal(T* signal_ptr) : ptr_(signal_ptr) {
+        curr_val_ = *ptr_;
+        prev_val_ = *ptr_;
     }
-    
-    bool changed() const override {
-        return prev_value_ != curr_value_;
+    void snapshot() override {
+        prev_val_ = curr_val_;
+        curr_val_ = *ptr_;
     }
-    
-    bool posedge() const {
-        return prev_value_ == T{0} && curr_value_ != T{0};
-    }
-    
-    bool negedge() const {
-        return prev_value_ != T{0} && curr_value_ == T{0};
-    }
-    
-    T prev_value() const { return prev_value_; }
-    T curr_value() const { return curr_value_; }
+    inline bool changed() const override { return curr_val_ != prev_val_; }
+    inline bool posedge() const { return (prev_val_ == 0) && (curr_val_ != 0); }
+    inline bool negedge() const { return (prev_val_ != 0) && (curr_val_ == 0); }
+    inline T val() const { return curr_val_; }
+    inline T prev() const { return prev_val_; }
 };
 
-// Signals snapshot - provides query interface to callbacks
-class Signals {
-    std::unordered_map<void*, SignalTracker*> trackers_;
-    
-public:
-    explicit Signals(const std::unordered_map<void*, std::unique_ptr<SignalTracker>>& all_trackers) {
-        // Build lookup map (non-owning pointers)
-        for (const auto& [ptr, tracker] : all_trackers) {
-            trackers_[ptr] = tracker.get();
-        }
-    }
-    
-    template<typename T>
-    bool changed(T* sig) const {
-        auto it = trackers_.find(static_cast<void*>(sig));
-        if (it == trackers_.end()) return false;
-        return it->second->changed();
-    }
-    
-    template<typename T>
-    bool posedge(T* sig) const {
-        auto it = trackers_.find(static_cast<void*>(sig));
-        if (it == trackers_.end()) return false;
-        auto* typed = dynamic_cast<TypedSignalTracker<T>*>(it->second);
-        return typed && typed->posedge();
-    }
-    
-    template<typename T>
-    bool negedge(T* sig) const {
-        auto it = trackers_.find(static_cast<void*>(sig));
-        if (it == trackers_.end()) return false;
-        auto* typed = dynamic_cast<TypedSignalTracker<T>*>(it->second);
-        return typed && typed->negedge();
-    }
-    
-    template<typename T>
-    T prev_value(T* sig) const {
-        auto it = trackers_.find(static_cast<void*>(sig));
-        if (it == trackers_.end()) return T{};
-        auto* typed = dynamic_cast<TypedSignalTracker<T>*>(it->second);
-        return typed ? typed->prev_value() : T{};
-    }
-    
-    template<typename T>
-    T curr_value(T* sig) const {
-        auto it = trackers_.find(static_cast<void*>(sig));
-        if (it == trackers_.end()) return T{};
-        auto* typed = dynamic_cast<TypedSignalTracker<T>*>(it->second);
-        return typed ? typed->curr_value() : T{};
-    }
-};
-
-class TestbenchScheduler {
+// ============================================================================
+// The Scheduler
+// ============================================================================
+class Scheduler {
 public:
     using Action = std::function<void()>;
-    
+    using TriggerCheck = std::function<void(Scheduler&)>;
+
 private:
-    // Time-based events
-    struct TimeEvent {
+    // Time Wheel
+    struct TimerEvent {
         uint64_t time;
         Action action;
-        
-        bool operator>(const TimeEvent& other) const {
-            return time > other.time;  // Min-heap
-        }
+        bool operator>(const TimerEvent& other) const { return time > other.time; }
     };
-    
-    std::priority_queue<TimeEvent, std::vector<TimeEvent>, std::greater<>> time_events_;
-    uint64_t current_time_{0};
-    
-    // Signal-based events
-    struct SignalWatcher {
-        std::vector<void*> watched_signals;
-        std::function<void(const Signals&)> callback;
+    std::priority_queue<TimerEvent, std::vector<TimerEvent>, std::greater<>> time_events_;
+
+    // Write Buffer
+    std::vector<Action> write_buffer_;
+
+    // Process & Signal Management
+    struct Process {
+        TriggerCheck callback;
+        bool is_always_active;
     };
-    
-    std::unordered_map<void*, std::unique_ptr<SignalTracker>> all_trackers_;
-    std::vector<SignalWatcher> signal_watchers_;
-    
+    std::vector<Process> processes_;
+    std::vector<bool> process_trigger_flags_; 
+    std::vector<std::unique_ptr<SignalBase>> tracked_signals_;
+
+    uint64_t current_time_ = 0;
+
 public:
-    // ===== Time-based scheduling =====
-    
-    void schedule_at(uint64_t time, Action action) {
-        time_events_.push({time, std::move(action)});
+    // --- Registration API ---
+
+    template <typename T>
+    Signal<T>* register_signal(T* signal_ptr) {
+        auto sig = std::make_unique<Signal<T>>(signal_ptr);
+        Signal<T>* handle = sig.get();
+        tracked_signals_.push_back(std::move(sig));
+        return handle;
     }
-    
+
+    void add_sensitive_process(const std::initializer_list<SignalBase*>& sensitivity_list, TriggerCheck cb) {
+        size_t pid = processes_.size();
+        processes_.push_back({std::move(cb), false});
+        process_trigger_flags_.push_back(false);
+        for (auto* sig : sensitivity_list) sig->add_dependency(pid);
+    }
+
+    void add_sensitive_process(TriggerCheck cb) {
+        processes_.push_back({std::move(cb), true});
+        process_trigger_flags_.push_back(false);
+    }
+
+    // --- Scheduling API ---
+
+    uint64_t time() const { return current_time_; }
+
     void schedule_after(uint64_t delay, Action action) {
-        schedule_at(current_time_ + delay, std::move(action));
+        time_events_.push({current_time_ + delay, std::move(action)});
     }
-    
-    uint64_t next_time_event() const {
-        if (time_events_.empty()) return UINT64_MAX;
-        return time_events_.top().time;
+
+    template <typename T, typename U>
+    void schedule_write(T* signal_ptr, U value) {
+        write_buffer_.push_back([signal_ptr, value]() { *signal_ptr = value; });
     }
-    
-    bool has_time_events() const {
-        return !time_events_.empty();
+
+private:
+    // --- Internal Helpers ---
+
+    uint64_t next_event_time() const {
+        return time_events_.empty() ? UINT64_MAX : time_events_.top().time;
     }
-    
-    // Execute all events scheduled for exactly this time
-    void execute_time_events(uint64_t time) {
-        current_time_ = time;
-        while (!time_events_.empty() && time_events_.top().time == time) {
-            auto event = std::move(time_events_.top());
+
+    void advance_time(uint64_t next_time) {
+        current_time_ = next_time;
+        while (!time_events_.empty() && time_events_.top().time == current_time_) {
+            auto ev = std::move(time_events_.top());
             time_events_.pop();
-            event.action();
+            ev.action(); // Likely schedules writes to buffer
         }
     }
-    // Helper to deduce lambda type
-    template<typename... SigPtrs>
-    void always(std::function<void(const Signals&)> callback, SigPtrs... signals) {
-        SignalWatcher watcher;
-        watcher.callback = std::move(callback);
-        
-        // Register each signal
-        (register_signal(signals, watcher), ...);
-        
-        signal_watchers_.push_back(std::move(watcher));
+
+    // Phase 1: Apply NBA Writes
+    bool apply_nba_writes() {
+        if (write_buffer_.empty()) return false;
+        for (const auto& write_op : write_buffer_) write_op();
+        write_buffer_.clear();
+        return true;
     }
 
+    // Phase 3: Trigger Reactivity
+    void trigger_reactivity() {
+        std::fill(process_trigger_flags_.begin(), process_trigger_flags_.end(), false);
+        
+        // 1. Snapshot & Check Changes
+        for (auto& sig : tracked_signals_) {
+            sig->snapshot();
+            if (sig->changed()) {
+                for (size_t pid : sig->get_dependents()) {
+                    process_trigger_flags_[pid] = true;
+                }
+            }
+        }
 
-
-    
-    // Sample all tracked signals (call after eval)
-    void sample_signals() {
-        for (auto& [ptr, tracker] : all_trackers_) {
-            tracker->sample();
+        // 2. Run Triggered Processes
+        for (size_t i = 0; i < processes_.size(); ++i) {
+            if (process_trigger_flags_[i] || processes_[i].is_always_active) {
+                processes_[i].callback(*this);
+            }
         }
     }
-    
-    // Check watchers and fire callbacks with snapshot
-    bool check_signal_watchers() {
-        Signals events(all_trackers_);
-        
-        bool any_fired = false;
-        for (const auto& watcher : signal_watchers_) {
-            bool should_fire = false;
-            for (void* sig_ptr : watcher.watched_signals) {
-                if (all_trackers_[sig_ptr]->changed()) {
-                    should_fire = true;
-                    break;
+
+public:
+    // ========================================================================
+    // THE KERNEL LOOP (Refactored per Expert Feedback)
+    // ========================================================================
+    template <typename TopModel, typename Trace = int>
+    void run(VerilatedContext* ctx, TopModel* top, Trace* tfp = nullptr, uint64_t timeout = UINT64_MAX) {
+        if (tfp) tfp->dump(0);
+
+        while (!ctx->gotFinish() && ctx->time() < timeout) {
+            
+            // 1. Time Arbitration
+            uint64_t next_cpp = next_event_time();
+            uint64_t next_model = top->eventsPending() ? top->nextTimeSlot() : UINT64_MAX;
+            uint64_t t_next = std::min(next_cpp, next_model);
+
+            if (t_next == UINT64_MAX) break;
+            
+            ctx->time(t_next);
+            advance_time(t_next); // Populates write_buffer_ from timed events
+
+            // 2. The Delta Cycle (The "Zero-Time Handshake" Loop)
+            bool stable = false;
+            int delta_count = 0;
+
+            while (!stable) {
+                // A. NBA PHASE: Apply writes (from Time Phase or Previous Delta)
+                bool writes_applied = apply_nba_writes();
+
+                // B. ACTIVE PHASE: Evaluate Model
+                // Run eval if inputs changed (writes_applied) OR internal model events exist
+                if (writes_applied || (top->eventsPending() && top->nextTimeSlot() <= t_next)) {
+                    top->eval();
+                }
+
+                // C. REACTIVE PHASE: Check Monitors
+                // This might populate write_buffer_ again (Combinatorial Feedback)
+                trigger_reactivity();
+
+                // D. CONVERGENCE CHECK
+                // Stable if no new writes were scheduled
+                if (write_buffer_.empty()) {
+                    stable = true;
+                } else {
+                    // Loop continues to apply new writes in Phase A
+                    if (++delta_count > 1000) {
+                        std::cerr << "[Fatal] Combinatorial Loop at time " << t_next << std::endl;
+                        return;
+                    }
                 }
             }
             
-            if (should_fire) {
-                watcher.callback(events);
-                any_fired = true;
-            }
-        }
-        
-        return any_fired;
-    }
-    
-    // ===== Utility =====
-    
-    bool has_events() const {
-        return !time_events_.empty() || !signal_watchers_.empty();
-    }
-    
-    uint64_t current_time() const { 
-        return current_time_; 
-    }
-    
-private:
-    template<typename T>
-    void register_signal(T* sig, SignalWatcher& watcher) {
-        void* ptr = static_cast<void*>(sig);
-        watcher.watched_signals.push_back(ptr);
-        
-        // Create tracker if new
-        if (all_trackers_.find(ptr) == all_trackers_.end()) {
-            all_trackers_[ptr] = std::make_unique<TypedSignalTracker<T>>(sig);
+            // 3. ReadOnly Phase
+            if (tfp) tfp->dump(ctx->time());
         }
     }
-
 };
+} // namespace Veroutines

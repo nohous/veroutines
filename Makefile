@@ -3,12 +3,18 @@ VERILATOR ?= verilator
 OUT_DIR = verilator_out
 SV_SRC := src/axibox.sv
 CPP_SRC := src/main.cpp
+
+# cause of ctrl-clickable links in terminal
+SV_SRC := $(realpath $(SV_SRC))
+CPP_SRC := $(realpath $(CPP_SRC))
+
 TOP_MODULE := axibox
 TARGET_NAME := V$(TOP_MODULE)
 TARGET := $(OUT_DIR)/$(TARGET_NAME)
 VMAKEFILE_NAME := $(TARGET_NAME).mk
 VMAKEFILE := $(OUT_DIR)/$(VMAKEFILE_NAME)
 VM_USER_CFLAGS := -CFLAGS "--std=c++20 -g3"
+
 
 all: $(TARGET)
 

@@ -1,0 +1,6 @@
+CompileFlags:
+  Add:
+    - -std=gnu++20
+    - -I./src
+    - -I./obj_dir
+    - -I/home/nohous/src/verilator/include
