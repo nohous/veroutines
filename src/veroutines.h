@@ -10,95 +10,222 @@
 
 namespace Veroutines {
 
-// ============================================================================
-// Signal Handle and Template Implementation (Unchanged)
-// ============================================================================
-class SignalBase {
-    std::vector<size_t> dependent_processes_;
+class Scheduler;
+
+// -----------------------------------------------------------------------------
+// Observable - Base for dependency tracking and type erasure
+// -----------------------------------------------------------------------------
+
+class Observable {
+    friend class Scheduler;
+protected:
+    std::vector<size_t> dependents_;
+
 public:
-    virtual ~SignalBase() = default;
-    virtual void snapshot() = 0;
+    virtual ~Observable() = default;
+    virtual void commit() {}
+    virtual void sample() {}
+    virtual bool dirty() const { return false; }
     virtual bool changed() const = 0;
-    void add_dependency(size_t process_id) { dependent_processes_.push_back(process_id); }
-    const std::vector<size_t>& get_dependents() const { return dependent_processes_; }
+
+    void add_dependent(size_t pid) { dependents_.push_back(pid); }
+    const std::vector<size_t>& dependents() const { return dependents_; }
 };
 
-template <typename T>
-class Signal : public SignalBase {
-    T* ptr_;
-    T  prev_val_;
-    T  curr_val_;
+// -----------------------------------------------------------------------------
+// InputPort<T> - Boundary: Testbench -> DUT
+//
+// Buffers writes until commit, then applies to DUT.
+// Tracks edges so processes can react to C++-driven signals (e.g. clock).
+// -----------------------------------------------------------------------------
+
+template<typename T>
+class InputPort : public Observable {
+    T* ptr_;       // -> DUT input
+    T staged_;     // Buffered write, applied on commit
+    T value_;      // Committed value (what DUT sees)
+    T before_;     // Value before last commit (for edges)
+    bool dirty_ = false;
+
 public:
-    explicit Signal(T* signal_ptr) : ptr_(signal_ptr) {
-        curr_val_ = *ptr_;
-        prev_val_ = *ptr_;
+    explicit InputPort(T* ptr)
+        : ptr_(ptr), staged_(*ptr), value_(*ptr), before_(*ptr) {}
+
+    void write(T v) { staged_ = v; dirty_ = true; }
+
+    void commit() override {
+        before_ = value_;
+        if (dirty_) {
+            *ptr_ = staged_;
+            value_ = staged_;
+            dirty_ = false;
+        }
     }
-    void snapshot() override {
-        prev_val_ = curr_val_;
-        curr_val_ = *ptr_;
-    }
-    inline bool changed() const override { return curr_val_ != prev_val_; }
-    inline bool posedge() const { return (prev_val_ == 0) && (curr_val_ != 0); }
-    inline bool negedge() const { return (prev_val_ != 0) && (curr_val_ == 0); }
-    inline T val() const { return curr_val_; }
-    inline T prev() const { return prev_val_; }
+
+    bool dirty() const override { return dirty_; }
+    bool changed() const override { return value_ != before_; }
+    bool posedge() const { return !before_ && value_; }
+    bool negedge() const { return before_ && !value_; }
+
+    T val() const { return value_; }
+    operator T() const { return value_; }
 };
 
-// ============================================================================
-// The Scheduler
-// ============================================================================
+// -----------------------------------------------------------------------------
+// OutputPort<T> - Boundary: DUT -> Testbench
+//
+// Samples DUT output each delta. Read-only from testbench.
+// Tracks edges for process triggering.
+// -----------------------------------------------------------------------------
+
+template<typename T>
+class OutputPort : public Observable {
+    T* ptr_;       // -> DUT output
+    T value_;      // Current sampled value
+    T before_;     // Value before last sample (for edges)
+
+public:
+    explicit OutputPort(T* ptr)
+        : ptr_(ptr), value_(*ptr), before_(*ptr) {}
+
+    void sample() override {
+        before_ = value_;
+        value_ = *ptr_;
+    }
+
+    bool changed() const override { return value_ != before_; }
+    bool posedge() const { return !before_ && value_; }
+    bool negedge() const { return before_ && !value_; }
+
+    T val() const { return value_; }
+    operator T() const { return value_; }
+};
+
+// -----------------------------------------------------------------------------
+// Signal<T> - Internal testbench state with NBA semantics
+//
+// Writes buffered until commit. Enables derived clocks, state machines.
+// -----------------------------------------------------------------------------
+
+template<typename T>
+class Signal : public Observable {
+    T staged_;     // Buffered write, applied on commit
+    T value_;      // Committed value
+    T before_;     // Value before last commit (for edges)
+    bool dirty_ = false;
+
+public:
+    explicit Signal(T initial = T{})
+        : staged_(initial), value_(initial), before_(initial) {}
+
+    void write(T v) { staged_ = v; dirty_ = true; }
+
+    void commit() override {
+        before_ = value_;
+        if (dirty_) {
+            value_ = staged_;
+            dirty_ = false;
+        }
+    }
+
+    bool dirty() const override { return dirty_; }
+    bool changed() const override { return value_ != before_; }
+    bool posedge() const { return !before_ && value_; }
+    bool negedge() const { return before_ && !value_; }
+
+    T val() const { return value_; }
+    operator T() const { return value_; }
+
+    Signal& operator=(T v) { write(v); return *this; }
+};
+
+// -----------------------------------------------------------------------------
+// Process - Callback triggered by signal changes
+// -----------------------------------------------------------------------------
+
+struct Process {
+    using Callback = std::function<void(Scheduler&)>;
+    Callback callback;
+    bool always_active;  // Run every delta regardless of triggers
+};
+
+// -----------------------------------------------------------------------------
+// Scheduler - 5-phase execution kernel
+//
+// 1. COMMIT   - Apply staged writes, capture edges
+// 2. EVAL     - model.eval()
+// 3. SAMPLE   - Capture DUT outputs
+// 4. REACT    - Trigger and run processes
+// 5. CONVERGE - Loop if dirty, else advance time
+// -----------------------------------------------------------------------------
+
 class Scheduler {
 public:
     using Action = std::function<void()>;
-    using TriggerCheck = std::function<void(Scheduler&)>;
 
 private:
-    // Time Wheel
-    struct TimerEvent {
+    struct TimedEvent {
         uint64_t time;
         Action action;
-        bool operator>(const TimerEvent& other) const { return time > other.time; }
+        bool operator>(const TimedEvent& o) const { return time > o.time; }
     };
-    std::priority_queue<TimerEvent, std::vector<TimerEvent>, std::greater<>> time_events_;
+    std::priority_queue<TimedEvent, std::vector<TimedEvent>, std::greater<>> time_events_;
 
-    // Write Buffer
-    std::vector<Action> write_buffer_;
+    std::vector<std::unique_ptr<Observable>> owned_;
+    std::vector<Observable*> inputs_;
+    std::vector<Observable*> outputs_;
+    std::vector<Observable*> signals_;
 
-    // Process & Signal Management
-    struct Process {
-        TriggerCheck callback;
-        bool is_always_active;
-    };
     std::vector<Process> processes_;
-    std::vector<bool> process_trigger_flags_; 
-    std::vector<std::unique_ptr<SignalBase>> tracked_signals_;
+    std::vector<bool> triggered_;
 
     uint64_t current_time_ = 0;
 
 public:
-    // --- Registration API ---
 
-    template <typename T>
-    Signal<T>* register_signal(T* signal_ptr) {
-        auto sig = std::make_unique<Signal<T>>(signal_ptr);
-        Signal<T>* handle = sig.get();
-        tracked_signals_.push_back(std::move(sig));
-        return handle;
+    // --- Registration ---
+
+    template<typename T>
+    InputPort<T>* input(T* dut_ptr) {
+        auto p = std::make_unique<InputPort<T>>(dut_ptr);
+        auto* h = p.get();
+        inputs_.push_back(h);
+        owned_.push_back(std::move(p));
+        return h;
     }
 
-    void add_sensitive_process(const std::initializer_list<SignalBase*>& sensitivity_list, TriggerCheck cb) {
+    template<typename T>
+    OutputPort<T>* output(T* dut_ptr) {
+        auto p = std::make_unique<OutputPort<T>>(dut_ptr);
+        auto* h = p.get();
+        outputs_.push_back(h);
+        owned_.push_back(std::move(p));
+        return h;
+    }
+
+    template<typename T>
+    Signal<T>* signal(T initial = T{}) {
+        auto p = std::make_unique<Signal<T>>(initial);
+        auto* h = p.get();
+        signals_.push_back(h);
+        owned_.push_back(std::move(p));
+        return h;
+    }
+
+    void process(std::initializer_list<Observable*> sens, Process::Callback cb) {
         size_t pid = processes_.size();
         processes_.push_back({std::move(cb), false});
-        process_trigger_flags_.push_back(false);
-        for (auto* sig : sensitivity_list) sig->add_dependency(pid);
+        triggered_.push_back(false);
+        for (auto* obs : sens)
+            obs->add_dependent(pid);
     }
 
-    void add_sensitive_process(TriggerCheck cb) {
+    void always(Process::Callback cb) {
         processes_.push_back({std::move(cb), true});
-        process_trigger_flags_.push_back(false);
+        triggered_.push_back(false);
     }
 
-    // --- Scheduling API ---
+    // --- Scheduling ---
 
     uint64_t time() const { return current_time_; }
 
@@ -106,111 +233,96 @@ public:
         time_events_.push({current_time_ + delay, std::move(action)});
     }
 
-    template <typename T, typename U>
-    void schedule_write(T* signal_ptr, U value) {
-        write_buffer_.push_back([signal_ptr, value]() { *signal_ptr = value; });
+    void schedule_at(uint64_t t, Action action) {
+        time_events_.push({t, std::move(action)});
     }
 
-private:
-    // --- Internal Helpers ---
+    // --- Main Loop ---
 
-    uint64_t next_event_time() const {
-        return time_events_.empty() ? UINT64_MAX : time_events_.top().time;
-    }
+    template<typename TopModel, typename Trace = int>
+    void run(VerilatedContext* ctx, TopModel* top, Trace* tfp = nullptr,
+             uint64_t timeout = UINT64_MAX) {
 
-    void advance_time(uint64_t next_time) {
-        current_time_ = next_time;
-        while (!time_events_.empty() && time_events_.top().time == current_time_) {
-            auto ev = std::move(time_events_.top());
-            time_events_.pop();
-            ev.action(); // Likely schedules writes to buffer
-        }
-    }
-
-    // Phase 1: Apply NBA Writes
-    bool apply_nba_writes() {
-        if (write_buffer_.empty()) return false;
-        for (const auto& write_op : write_buffer_) write_op();
-        write_buffer_.clear();
-        return true;
-    }
-
-    // Phase 3: Trigger Reactivity
-    void trigger_reactivity() {
-        std::fill(process_trigger_flags_.begin(), process_trigger_flags_.end(), false);
-        
-        // 1. Snapshot & Check Changes
-        for (auto& sig : tracked_signals_) {
-            sig->snapshot();
-            if (sig->changed()) {
-                for (size_t pid : sig->get_dependents()) {
-                    process_trigger_flags_[pid] = true;
-                }
-            }
-        }
-
-        // 2. Run Triggered Processes
-        for (size_t i = 0; i < processes_.size(); ++i) {
-            if (process_trigger_flags_[i] || processes_[i].is_always_active) {
-                processes_[i].callback(*this);
-            }
-        }
-    }
-
-public:
-    // ========================================================================
-    // THE KERNEL LOOP (Refactored per Expert Feedback)
-    // ========================================================================
-    template <typename TopModel, typename Trace = int>
-    void run(VerilatedContext* ctx, TopModel* top, Trace* tfp = nullptr, uint64_t timeout = UINT64_MAX) {
         if (tfp) tfp->dump(0);
 
         while (!ctx->gotFinish() && ctx->time() < timeout) {
-            
-            // 1. Time Arbitration
-            uint64_t next_cpp = next_event_time();
-            uint64_t next_model = top->eventsPending() ? top->nextTimeSlot() : UINT64_MAX;
-            uint64_t t_next = std::min(next_cpp, next_model);
 
+            // Time advancement
+            uint64_t t_cosim = time_events_.empty() ? UINT64_MAX : time_events_.top().time;
+            uint64_t t_model = top->eventsPending() ? top->nextTimeSlot() : UINT64_MAX;
+            uint64_t t_next = std::min(t_cosim, t_model);
             if (t_next == UINT64_MAX) break;
-            
+
             ctx->time(t_next);
-            advance_time(t_next); // Populates write_buffer_ from timed events
+            current_time_ = t_next;
 
-            // 2. The Delta Cycle (The "Zero-Time Handshake" Loop)
-            bool stable = false;
-            int delta_count = 0;
+            // Fire timed events (may stage writes)
+            while (!time_events_.empty() && time_events_.top().time == current_time_) {
+                auto ev = std::move(const_cast<TimedEvent&>(time_events_.top()));
+                time_events_.pop();
+                ev.action();
+            }
 
-            while (!stable) {
-                // A. NBA PHASE: Apply writes (from Time Phase or Previous Delta)
-                bool writes_applied = apply_nba_writes();
+            // Delta convergence loop
+            int delta = 0;
+            while (true) {
 
-                // B. ACTIVE PHASE: Evaluate Model
-                // Run eval if inputs changed (writes_applied) OR internal model events exist
-                if (writes_applied || (top->eventsPending() && top->nextTimeSlot() <= t_next)) {
+                // PHASE 1: COMMIT
+                for (auto* p : inputs_)  p->commit();
+                for (auto* p : signals_) p->commit();
+
+                // PHASE 2: EVAL
+                bool need_eval = has_dirty_input() || has_dirty_signal() ||
+                                 (top->eventsPending() && top->nextTimeSlot() <= t_next);
+                if (need_eval || delta == 0)
                     top->eval();
-                }
 
-                // C. REACTIVE PHASE: Check Monitors
-                // This might populate write_buffer_ again (Combinatorial Feedback)
-                trigger_reactivity();
+                // PHASE 3: SAMPLE
+                for (auto* p : outputs_) p->sample();
 
-                // D. CONVERGENCE CHECK
-                // Stable if no new writes were scheduled
-                if (write_buffer_.empty()) {
-                    stable = true;
-                } else {
-                    // Loop continues to apply new writes in Phase A
-                    if (++delta_count > 1000) {
-                        std::cerr << "[Fatal] Combinatorial Loop at time " << t_next << std::endl;
-                        return;
-                    }
+                // PHASE 4: REACT
+                std::fill(triggered_.begin(), triggered_.end(), false);
+
+                for (auto* o : inputs_)
+                    if (o->changed())
+                        for (size_t pid : o->dependents()) triggered_[pid] = true;
+
+                for (auto* o : signals_)
+                    if (o->changed())
+                        for (size_t pid : o->dependents()) triggered_[pid] = true;
+
+                for (auto* o : outputs_)
+                    if (o->changed())
+                        for (size_t pid : o->dependents()) triggered_[pid] = true;
+
+                for (size_t i = 0; i < processes_.size(); ++i)
+                    if (triggered_[i] || processes_[i].always_active)
+                        processes_[i].callback(*this);
+
+                // PHASE 5: CONVERGENCE
+                if (!has_dirty_input() && !has_dirty_signal())
+                    break;
+
+                if (++delta > 1000) {
+                    std::cerr << "[Veroutines] Combinational loop at t=" << t_next << "\n";
+                    return;
                 }
             }
-            
-            // 3. ReadOnly Phase
+
             if (tfp) tfp->dump(ctx->time());
         }
     }
+
+private:
+    bool has_dirty_input() const {
+        for (auto* p : inputs_) if (p->dirty()) return true;
+        return false;
+    }
+
+    bool has_dirty_signal() const {
+        for (auto* p : signals_) if (p->dirty()) return true;
+        return false;
+    }
 };
+
 } // namespace Veroutines
