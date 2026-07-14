@@ -1,0 +1,19 @@
+# build trees
+/build/
+build*/
+obj_dir/
+**/obj_dir/
+
+# compiled test binaries (extensionless); keep every source
+tests/t0_*
+!tests/*.cpp
+!tests/*.h
+tests/t1/V*
+demo/ring
+
+# editor / tooling
+.cache/
+compile_commands.json
+.clangd
+*.o
+*.out

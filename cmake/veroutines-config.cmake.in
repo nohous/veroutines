@@ -1,0 +1,7 @@
+@PACKAGE_INIT@
+
+# veroutines is header-only: the exported INTERFACE target carries the
+# include directory and the C++23 requirement. No components.
+include("${CMAKE_CURRENT_LIST_DIR}/veroutines-targets.cmake")
+
+check_required_components(veroutines)
