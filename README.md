@@ -67,10 +67,19 @@ clauses (C1-C12), each pinned by a tier-0 test.
 
 ## API at a glance
 
+The everyday vocabulary reads like clocked RTL - a designer writing a
+behavioral model reaches only for these:
+
 - `signal<T>` - value with staged writes and edge derivation
 - `drive<T>` / `observed<T>` - a model input (staged, sinks on commit) / output (sampled after eval)
-- Waits: `delay(d)` (or `co_await 25_ns`), `posedge`/`negedge`, `changed(sigs...)`, `changed(any)`, `until(pred)`, `settled()`
 - `task<T>` - a process or subroutine; returns a value or propagates an exception, on a constant stack
+- `co_await posedge(clk)` / `negedge` / `delay(d)` (or `co_await 25_ns`), and `sig <<= v`
+
+The rest is the observer / verification tier - a monitor or a cosim comb bridge
+reaches for these, everyday modeling code does not:
+
+- `changed(sigs...)` (explicit sensitivity), `changed(any)` (wildcard), `until(pred)` (poll plain state)
+- `settled()` - the postponed phase: the slot's converged state, once per slot. Ordinary clocked reads never need it, because the register boundary already hides deltas; it earns its keep observing within-slot combinational settling (see the comb-partition example)
 - `channel<T>` - unbuffered rendezvous with `close()`
 - `race(aws...)` - run awaitables concurrently, resume with the winner's index, cancel the rest
 - `scheduler` - `spawn`, `run` / `run_until` / `run_for`, `stop`, and the `eval_model` / `model_next_event` hooks a verilated model binds through
@@ -105,6 +114,20 @@ use-after-free coroutine frame fails the suite.
   module (`--timing`): flop/comb boundary timing, an FSM handshake, an
   SV-master direction, and coprime clock domains. Built only when verilator is
   discoverable.
+
+## Examples
+
+Illustrative cosim programs pairing a verilated behavioral model with a C++
+behavioral model (`examples/`, built when verilator is found, self-checking):
+
+- **`uart_link`** - a behavioral RTL UART transmitter and a C++ oversampling
+  receiver, one wire (`txd`) across the boundary. The everyday vocabulary only:
+  edges, clocked sampling, staged writes. The "feels at home" starting point.
+- **`comb_partition`** - a combinational datapath cut by the boundary: the comb
+  path crosses twice (`addr -> rdata -> mask -> result`), acyclic, no clock, so
+  the delta loop relaxes it to a fixpoint within one slot. Shows the dual-head
+  convergence directly - a traced vector prints the intra-slot relaxation from a
+  transient (stale crossing) to the settled value.
 
 ## Demo
 

@@ -9,3 +9,4 @@ if(NOT verilator_FOUND)
 endif()
 
 add_subdirectory(comb_partition)
+add_subdirectory(uart_link)
