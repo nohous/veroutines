@@ -29,12 +29,20 @@ else()
     set(veroutines_is_top OFF)
 endif()
 
-option(VEROUTINES_BUILD_TESTS "Build the veroutines test suite" ${veroutines_is_top})
-option(VEROUTINES_BUILD_DEMO  "Build the veroutines demo"       ${veroutines_is_top})
+option(VEROUTINES_BUILD_TESTS    "Build the veroutines test suite" ${veroutines_is_top})
+option(VEROUTINES_BUILD_DEMO     "Build the veroutines demo"       ${veroutines_is_top})
+option(VEROUTINES_BUILD_EXAMPLES "Build the veroutines examples"   ${veroutines_is_top})
+
+if(VEROUTINES_BUILD_TESTS OR VEROUTINES_BUILD_EXAMPLES)
+    enable_testing()
+endif()
 
 if(VEROUTINES_BUILD_TESTS)
-    enable_testing()
     add_subdirectory(tests)
+endif()
+
+if(VEROUTINES_BUILD_EXAMPLES)
+    add_subdirectory(examples)
 endif()
 
 if(VEROUTINES_BUILD_DEMO)
