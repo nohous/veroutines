@@ -39,6 +39,7 @@
 #include <optional>
 #include <queue>
 #include <string>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -1143,6 +1144,128 @@ void process(scheduler& s, edge_trigger<S> trig, F body, std::string name = {}) 
 template<typename F>
 void comb(scheduler& s, F body, std::string name = {}) {
     s.spawn(detail::comb_process(std::move(body)), std::move(name));
+}
+
+// -----------------------------------------------------------------------------
+// Waveform tracing
+// -----------------------------------------------------------------------------
+//
+// A settled-phase VCD tracer: one file, written live, carrying C++ signals and
+// any model signal surfaced through observed - so a cosim trace holds both
+// heads with no post-merge. It samples at settled() (the slot's converged
+// state), so the file shows one value per time slot, not delta transients.
+
+/**
+ * @brief Unified VCD tracer. Register signals with add() before run(); values
+ *        are sampled once per slot in the settled phase and written on change.
+ *
+ * Traces anything with the port value interface (signal, drive, observed).
+ * Widths default to the type size (bool is one bit); pass width for a packed
+ * field. Up to 64 bits per signal.
+ */
+struct wave {
+    wave(scheduler& s, const char* path, std::string top = "top");
+    ~wave() { if (file) { std::fclose(file); } }
+
+    wave(const wave&) = delete;
+    wave& operator=(const wave&) = delete;
+
+    void scope(const std::string& name) { decls += "$scope module " + name + " $end\n"; }
+    void pop() { decls += "$upscope $end\n"; }
+
+    template<typename T>
+    wave& add(const std::string& name, const edge_state<T>& sig, int width = -1) {
+        int w = width > 0 ? width : (std::is_same_v<T, bool> ? 1 : int(sizeof(T) * 8));
+        auto code = id(entries.size());
+
+        decls += "$var wire " + std::to_string(w) + " " + code + " " + name + " $end\n";
+        entries.push_back({code, w, [&sig] { return static_cast<std::uint64_t>(sig.get()); }, 0});
+        return *this;
+    }
+
+    void dump() {
+        if (!file) {
+            return;
+        }
+
+        auto t = sched->now().count();
+        if (!header_done) {
+            std::fprintf(file, "$timescale 1fs $end\n$scope module %s $end\n%s$upscope $end\n"
+                               "$enddefinitions $end\n#%llu\n$dumpvars\n",
+                         top_name.c_str(), decls.c_str(), static_cast<unsigned long long>(t));
+            for (auto& e : entries) {
+                e.last = e.read();
+                emit(e);
+            }
+            std::fprintf(file, "$end\n");
+            header_done = true;
+            return;
+        }
+
+        bool stamped = false;
+        for (auto& e : entries) {
+            auto v = e.read();
+            if (v == e.last) {
+                continue;
+            }
+            if (!stamped) {
+                std::fprintf(file, "#%llu\n", static_cast<unsigned long long>(t));
+                stamped = true;
+            }
+            e.last = v;
+            emit(e);
+        }
+    }
+
+private:
+    struct entry {
+        std::string code;
+        int width;
+        std::function<std::uint64_t()> read;
+        std::uint64_t last;
+    };
+
+    void emit(const entry& e) {
+        if (e.width == 1) {
+            std::fprintf(file, "%d%s\n", int(e.last & 1), e.code.c_str());
+        } else {
+            std::string bits;
+            for (int b = e.width - 1; b >= 0; b--) {
+                bits.push_back(((e.last >> b) & 1) ? '1' : '0');
+            }
+            std::fprintf(file, "b%s %s\n", bits.c_str(), e.code.c_str());
+        }
+    }
+
+    static std::string id(std::size_t i) {
+        std::string c;
+        do {
+            c.push_back(static_cast<char>(33 + (i % 94)));
+            i /= 94;
+        } while (i > 0);
+        return c;
+    }
+
+    scheduler* sched;
+    std::FILE* file;
+    std::string top_name;
+    std::string decls;
+    std::vector<entry> entries;
+    bool header_done{false};
+};
+
+namespace detail {
+    inline task<> wave_proc(wave& w) {
+        for (;;) {
+            co_await settled();
+            w.dump();
+        }
+    }
+}
+
+inline wave::wave(scheduler& s, const char* path, std::string top)
+    : sched(&s), file(std::fopen(path, "w")), top_name(std::move(top)) {
+    s.spawn(detail::wave_proc(*this), "wave");
 }
 
 }

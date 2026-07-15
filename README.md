@@ -83,6 +83,7 @@ reaches for these, everyday modeling code does not:
 - `settled()` - the postponed phase: the slot's converged state, once per slot. Ordinary clocked reads never need it, because the register boundary already hides deltas; it earns its keep observing within-slot combinational settling (see the comb-partition example)
 - `channel<T>` - unbuffered rendezvous with `close()`
 - `race(aws...)` - run awaitables concurrently, resume with the winner's index, cancel the rest
+- `wave` - a settled-phase VCD tracer: C++ signals and model signals (via `observed`) in one file
 - `scheduler` - `spawn`, `run` / `run_until` / `run_for`, `stop`, and the `eval_model` / `model_next_event` hooks a verilated model binds through
 
 ## Writing a design
@@ -107,6 +108,23 @@ struct counter {                              // the architecture body
 `comb` re-evaluates on any change and converges by the fixpoint, so it carries
 no sensitivity list. A combinational output settles one delta round after its
 input, so read it at `settled()`.
+
+## Waveform tracing
+
+`wave` writes a single VCD live from the settled phase - C++ signals and any
+model signal you surface through `observed`, in one file, with no post-merge:
+
+```cpp
+wave w(s, "run.vcd", "tb");
+w.scope("cpp");  w.add("addr", addr);   w.add("mask", mask);     w.pop();
+w.scope("rtl");  w.add("rdata", rdata); w.add("result", result); w.pop();
+// ... run; the file carries both heads on one timeline
+```
+
+It samples at `settled()`, so the trace shows one value per slot - the slot's
+converged state, not delta transients. Register signals before `run()`. For a
+model's internal signals, expose them (verilator `--public`) and bind an
+`observed` to trace them alongside the C++ side.
 
 ## Building
 
