@@ -73,7 +73,8 @@ behavioral model reaches only for these:
 - `signal<T>` - value with staged writes and edge derivation
 - `drive<T>` / `observed<T>` - a model input (staged, sinks on commit) / output (sampled after eval)
 - `task<T>` - a process or subroutine; returns a value or propagates an exception, on a constant stack
-- `co_await posedge(clk)` / `negedge` / `delay(d)` (or `co_await 25_ns`), and `sig <<= v`
+- `co_await rising_edge(clk)` / `falling_edge` / `delay(d)` (or `co_await 25_ns`), and `sig <<= v`
+- `process(s, rising_edge(clk), body)` / `comb(s, body)` - VHDL-flavored clocked and combinational processes
 
 The rest is the observer / verification tier - a monitor or a cosim comb bridge
 reaches for these, everyday modeling code does not:
@@ -83,6 +84,29 @@ reaches for these, everyday modeling code does not:
 - `channel<T>` - unbuffered rendezvous with `close()`
 - `race(aws...)` - run awaitables concurrently, resume with the winner's index, cancel the rest
 - `scheduler` - `spawn`, `run` / `run_until` / `run_for`, `stop`, and the `eval_model` / `model_next_event` hooks a verilated model binds through
+
+## Writing a design
+
+The HDL surface is VHDL-flavored sugar over the primitives, so it reads like an
+architecture body - `process` for a clocked (edge-triggered) process, `comb` for
+a concurrent combinational statement, `rising_edge`/`falling_edge` as triggers:
+
+```cpp
+struct counter {                              // the architecture body
+    signal<bool>&    clk;
+    signal<uint8_t>  q;
+    signal<uint8_t>  q2;
+
+    counter(scheduler& s, signal<bool>& clk_) : clk(clk_), q{s}, q2{s} {
+        process(s, rising_edge(clk), [&]{ q <<= q + 1; });   // clocked
+        comb(s, [&]{ q2 <<= q * 2; });                       // combinational
+    }
+};
+```
+
+`comb` re-evaluates on any change and converges by the fixpoint, so it carries
+no sensitivity list. A combinational output settles one delta round after its
+input, so read it at `settled()`.
 
 ## Building
 

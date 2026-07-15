@@ -1072,4 +1072,77 @@ task<std::size_t> race(As... aws) {
     co_return *st.winner;
 }
 
+// -----------------------------------------------------------------------------
+// HDL surface
+// -----------------------------------------------------------------------------
+//
+// VHDL-flavored sugar over spawn and the wait primitives - nothing the kernel
+// does not already expose. A clocked process waits on an edge; a combinational
+// process re-evaluates on any change and converges by the fixpoint, so it needs
+// no sensitivity list (C5).
+
+/**
+ * @brief A clock edge as a reusable trigger: co_await rising_edge(clk) directly,
+ *        or pass it to process(). Re-arming rebuilds the underlying edge wait,
+ *        so a process loop reuses one trigger across cycles.
+ */
+template<typename S>
+struct edge_trigger {
+    S* sig;
+    detail::edge kind;
+
+    bool await_ready() const noexcept { return false; }
+
+    template<typename P>
+    void await_suspend(std::coroutine_handle<P> h) const {
+        detail::edge_awaiter<S>{*sig, kind}.await_suspend(h);
+    }
+
+    void await_resume() const noexcept {}
+};
+
+template<typename S>
+edge_trigger<S> rising_edge(S& sig) { return {&sig, detail::edge::rise}; }
+
+template<typename S>
+edge_trigger<S> falling_edge(S& sig) { return {&sig, detail::edge::fall}; }
+
+namespace detail {
+    template<typename Trig, typename F>
+    task<> triggered_process(Trig trig, F body) {
+        for (;;) {
+            co_await trig;
+            body();
+        }
+    }
+
+    template<typename F>
+    task<> comb_process(F body) {
+        for (;;) {
+            body();
+            co_await changed(any);
+        }
+    }
+}
+
+/**
+ * @brief A triggered process: runs body once each time the trigger fires.
+ *
+ * process(s, rising_edge(clk), [&]{ q <<= d; }) is the clocked process - body
+ * reads committed state and stages the next values.
+ */
+template<typename S, typename F>
+void process(scheduler& s, edge_trigger<S> trig, F body, std::string name = {}) {
+    s.spawn(detail::triggered_process(trig, std::move(body)), std::move(name));
+}
+
+/**
+ * @brief A concurrent combinational statement: body re-evaluates on any change
+ *        and converges by the fixpoint, so it carries no sensitivity list.
+ */
+template<typename F>
+void comb(scheduler& s, F body, std::string name = {}) {
+    s.spawn(detail::comb_process(std::move(body)), std::move(name));
+}
+
 }
