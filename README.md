@@ -109,6 +109,12 @@ struct counter {                              // the architecture body
 no sensitivity list. A combinational output settles one delta round after its
 input, so read it at `settled()`.
 
+A useful convention keeps the two layers apart by vocabulary: a **behavioral
+model** is a struct of `signal`s wired by `process`/`comb` and nothing else,
+while the **testbench** is everything that reaches for the observer tier
+(`settled`/`changed(any)`/`until`) or the boundary (`model_in`/`model_out`). The
+`uart_link` example is built this way.
+
 ## Waveform tracing
 
 `wave` writes a single VCD live from the settled phase - C++ signals and any
@@ -162,9 +168,12 @@ use-after-free coroutine frame fails the suite.
 Illustrative cosim programs pairing a verilated behavioral model with a C++
 behavioral model (`examples/`, built when verilator is found, self-checking):
 
-- **`uart_link`** - a behavioral RTL UART transmitter and a C++ oversampling
-  receiver, one wire (`txd`) across the boundary. The everyday vocabulary only:
-  edges, clocked sampling, staged writes. The "feels at home" starting point.
+- **`uart_link`** - the behav/sim split made concrete. A pure-`signal` C++
+  `uart_tx` model (behav - a transcription of the RTL) and a testbench templated
+  over the port set (sim), so the *same* clock/stimulus/receiver drives either
+  the C++ model or the verilated RTL. It runs both and asserts they recover the
+  message identically - a backend-agnostic testbench that cross-validates the
+  C++ model against the RTL byte for byte.
 - **`comb_partition`** - a combinational datapath cut by the boundary: the comb
   path crosses twice (`addr -> rdata -> mask -> result`), acyclic, no clock, so
   the delta loop relaxes it to a fixpoint within one slot. Shows the dual-head
