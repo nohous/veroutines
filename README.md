@@ -128,9 +128,18 @@ w.scope("rtl");  w.add("rdata", rdata); w.add("result", result); w.pop();
 ```
 
 It samples at `settled()`, so the trace shows one value per slot - the slot's
-converged state, not delta transients. Register signals before `run()`. For a
-model's internal signals, expose them (verilator `--public`) and bind a
-`model_out` to trace them alongside the C++ side.
+converged state, not delta transients. Register signals before `run()`.
+
+Two ways to get the model's internals into the trace:
+
+- **Curated, one file, no merge** - expose the internals you want (verilator
+  `--public-flat-rw`) and bind a `model_out` to each (`top->rootp->mod__DOT__sig`);
+  they trace in the same file as the C++ side.
+- **Full hierarchy, one extra command** - let verilator's own tracer (`--trace`)
+  dump the entire model and `wave` dump the C++ side, then combine the two VCDs
+  with `scripts/merge_vcd.py`. They share a time axis (`on_time_advance` stamps
+  the model clock with the kernel's time), so the merge is mechanical. The
+  `merged_trace` example does exactly this.
 
 ## Building
 

@@ -10,3 +10,4 @@ endif()
 
 add_subdirectory(comb_partition)
 add_subdirectory(uart_link)
+add_subdirectory(merged_trace)
