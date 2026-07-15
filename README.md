@@ -127,6 +127,20 @@ w.scope("rtl");  w.add("rdata", rdata); w.add("result", result); w.pop();
 // ... run; the file carries both heads on one timeline
 ```
 
+Or name the signals and let the wave sweep them - a dotted name nests into
+scopes, so there is no per-signal `add`:
+
+```cpp
+signal<std::uint8_t> shifter{s, "tx.shifter"};   // names itself, self-registers
+signal<int> bitpos{s, "tx.bitpos"};
+...
+wave w(s, "run.vcd", "tb");
+w.add_all();                                     // every named signal, nested by dots
+```
+
+The name is the signal's trace identity (typed once, like a VHDL signal - C++
+has no reflection to recover the variable name).
+
 It samples at `settled()`, so the trace shows one value per slot - the slot's
 converged state, not delta transients. Register signals before `run()`.
 

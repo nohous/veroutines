@@ -26,6 +26,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <coroutine>
@@ -198,6 +199,20 @@ struct scheduler {
 
     void register_commit(std::function<void()> fn) { commit_hooks.push_back(std::move(fn)); }
     void register_sample(std::function<void()> fn) { sample_hooks.push_back(std::move(fn)); }
+
+    // A named signal for tracing: wave::add_all() sweeps these. A dotted name
+    // (e.g. "tx.shifter") becomes a scope path.
+    struct traced {
+        std::string name;
+        int width;
+        std::function<std::uint64_t()> read;
+    };
+
+    void register_traced(std::string name, int width, std::function<std::uint64_t()> read) {
+        traced_signals.push_back({std::move(name), width, std::move(read)});
+    }
+
+    std::vector<traced> traced_signals;
 
     // ---- Kernel internals: awaitables, ports, and channels park here -------
 
@@ -606,6 +621,15 @@ struct signal : edge_state<T> {
         this->prev = init;
         this->current = init;
         s.register_commit([this] { commit(); });
+    }
+
+    // Named: also self-registers for wave::add_all(). The name is the signal's
+    // trace identity (a dotted name nests into scopes). Taken as const char* so
+    // a string-literal name is an exact match, not confused with the init value.
+    signal(scheduler& s, const char* name, T init = T{}) : signal(s, init) {
+        s.register_traced(name,
+                          std::is_same_v<T, bool> ? 1 : int(sizeof(T) * 8),
+                          [this] { return static_cast<std::uint64_t>(this->get()); });
     }
 
     signal(const signal&) = delete;
@@ -1182,6 +1206,49 @@ struct wave {
 
         decls += "$var wire " + std::to_string(w) + " " + code + " " + name + " $end\n";
         entries.push_back({code, w, [&sig] { return static_cast<std::uint64_t>(sig.get()); }, 0});
+        return *this;
+    }
+
+    // Add every named signal (signal<T>{s, "name"}). A dotted name nests into
+    // scopes, so "tx.shifter" lands in a tx scope. Call before run().
+    wave& add_all() {
+        auto sigs = sched->traced_signals;
+        std::sort(sigs.begin(), sigs.end(),
+                  [](const scheduler::traced& a, const scheduler::traced& b) { return a.name < b.name; });
+
+        std::vector<std::string> stack;
+        for (auto& t : sigs) {
+            std::vector<std::string> path;
+            std::size_t start = 0;
+            for (std::size_t i = 0; i <= t.name.size(); i++) {
+                if (i == t.name.size() || t.name[i] == '.') {
+                    path.push_back(t.name.substr(start, i - start));
+                    start = i + 1;
+                }
+            }
+            std::string leaf = path.back();
+            path.pop_back();
+
+            std::size_t common = 0;
+            while (common < stack.size() && common < path.size() && stack[common] == path[common]) {
+                common++;
+            }
+            for (std::size_t i = stack.size(); i > common; i--) {
+                decls += "$upscope $end\n";
+            }
+            stack.resize(common);
+            for (std::size_t i = common; i < path.size(); i++) {
+                decls += "$scope module " + path[i] + " $end\n";
+                stack.push_back(path[i]);
+            }
+
+            auto code = id(entries.size());
+            decls += "$var wire " + std::to_string(t.width) + " " + code + " " + leaf + " $end\n";
+            entries.push_back({code, t.width, t.read, 0});
+        }
+        for (std::size_t i = stack.size(); i > 0; i--) {
+            decls += "$upscope $end\n";
+        }
         return *this;
     }
 
