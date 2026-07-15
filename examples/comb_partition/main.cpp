@@ -21,6 +21,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 
 using namespace veroutines;
@@ -128,6 +129,30 @@ int main(int argc, char** argv) {
     rig r;
     r.ctx->commandArgs(argc, argv);
 
+    // Optional unified VCD: +vcd or +vcd=<path>. The C++ drives and the model
+    // outputs (via observed) land in one file, both heads on one timeline.
+    const char* vcd_path = nullptr;
+    for (int i = 1; i < argc; i++) {
+        if (std::strncmp(argv[i], "+vcd=", 5) == 0) {
+            vcd_path = argv[i] + 5;
+        } else if (std::strcmp(argv[i], "+vcd") == 0) {
+            vcd_path = "comb_partition.vcd";
+        }
+    }
+
+    std::unique_ptr<wave> trace;
+    if (vcd_path) {
+        trace = std::make_unique<wave>(r.s, vcd_path, "tb");
+        trace->scope("cpp");
+        trace->add("addr", r.addr);
+        trace->add("mask", r.mask);
+        trace->pop();
+        trace->scope("rtl");
+        trace->add("rdata", r.rdata);
+        trace->add("result", r.result);
+        trace->pop();
+    }
+
     int checked = 0;
     r.s.spawn(derive_mask(r), "derive_mask");
     r.s.spawn(watch_result(r), "watch_result");
@@ -145,6 +170,12 @@ int main(int argc, char** argv) {
                 a, rom(a), rotl3(rom(a)), golden(a));
     std::printf("  swept 256 addresses; every cross-boundary comb result matched golden\n");
     std::printf("  and settled within its own slot (zero added latency)\n");
+
+    if (trace) {
+        trace.reset();   // flush and close the VCD before reporting it
+        std::printf("  wrote unified VCD (cpp drives + rtl observeds) to %s\n", vcd_path);
+    }
+
     std::printf("PASS comb_partition\n");
     return 0;
 }
