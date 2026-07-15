@@ -58,8 +58,8 @@ struct rig {
     std::unique_ptr<VerilatedContext> ctx;
     std::unique_ptr<Vcomb_slave> top;
 
-    drive<std::uint8_t> addr, mask;
-    observed<std::uint8_t> rdata, result;
+    model_in<std::uint8_t> addr, mask;
+    model_out<std::uint8_t> rdata, result;
     bool trace = false;   // narrate the delta-round relaxation for one vector
 
     rig() {
@@ -129,8 +129,8 @@ int main(int argc, char** argv) {
     rig r;
     r.ctx->commandArgs(argc, argv);
 
-    // Optional unified VCD: +vcd or +vcd=<path>. The C++ drives and the model
-    // outputs (via observed) land in one file, both heads on one timeline.
+    // Optional unified VCD: +vcd or +vcd=<path>. The C++ model_in ports and the
+    // model_out ports land in one file, both heads on one timeline.
     const char* vcd_path = nullptr;
     for (int i = 1; i < argc; i++) {
         if (std::strncmp(argv[i], "+vcd=", 5) == 0) {
@@ -173,7 +173,7 @@ int main(int argc, char** argv) {
 
     if (trace) {
         trace.reset();   // flush and close the VCD before reporting it
-        std::printf("  wrote unified VCD (cpp drives + rtl observeds) to %s\n", vcd_path);
+        std::printf("  wrote unified VCD (cpp model_in + rtl model_out) to %s\n", vcd_path);
     }
 
     std::printf("PASS comb_partition\n");

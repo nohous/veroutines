@@ -71,7 +71,7 @@ The everyday vocabulary reads like clocked RTL - a designer writing a
 behavioral model reaches only for these:
 
 - `signal<T>` - value with staged writes and edge derivation
-- `drive<T>` / `observed<T>` - a model input (staged, sinks on commit) / output (sampled after eval)
+- `model_in<T>` / `model_out<T>` - a model input port (driven) / output port (sampled after eval)
 - `task<T>` - a process or subroutine; returns a value or propagates an exception, on a constant stack
 - `co_await rising_edge(clk)` / `falling_edge` / `delay(d)` (or `co_await 25_ns`), and `sig <<= v`
 - `process(s, rising_edge(clk), body)` / `comb(s, body)` - VHDL-flavored clocked and combinational processes
@@ -83,7 +83,7 @@ reaches for these, everyday modeling code does not:
 - `settled()` - the postponed phase: the slot's converged state, once per slot. Ordinary clocked reads never need it, because the register boundary already hides deltas; it earns its keep observing within-slot combinational settling (see the comb-partition example)
 - `channel<T>` - unbuffered rendezvous with `close()`
 - `race(aws...)` - run awaitables concurrently, resume with the winner's index, cancel the rest
-- `wave` - a settled-phase VCD tracer: C++ signals and model signals (via `observed`) in one file
+- `wave` - a settled-phase VCD tracer: C++ signals and model signals (via `model_out`) in one file
 - `scheduler` - `spawn`, `run` / `run_until` / `run_for`, `stop`, and the `eval_model` / `model_next_event` hooks a verilated model binds through
 
 ## Writing a design
@@ -112,7 +112,7 @@ input, so read it at `settled()`.
 ## Waveform tracing
 
 `wave` writes a single VCD live from the settled phase - C++ signals and any
-model signal you surface through `observed`, in one file, with no post-merge:
+model signal you surface through `model_out`, in one file, with no post-merge:
 
 ```cpp
 wave w(s, "run.vcd", "tb");
@@ -123,8 +123,8 @@ w.scope("rtl");  w.add("rdata", rdata); w.add("result", result); w.pop();
 
 It samples at `settled()`, so the trace shows one value per slot - the slot's
 converged state, not delta transients. Register signals before `run()`. For a
-model's internal signals, expose them (verilator `--public`) and bind an
-`observed` to trace them alongside the C++ side.
+model's internal signals, expose them (verilator `--public`) and bind a
+`model_out` to trace them alongside the C++ side.
 
 ## Building
 

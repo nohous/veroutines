@@ -194,7 +194,7 @@ struct scheduler {
 
     void run_for(sim_time d) { run_until(sim_time{time_fs} + d); }
 
-    // ---- Raw boundary hooks (drive/observed register through these) --------
+    // ---- Raw boundary hooks (model_in/model_out register through these) ----
 
     void register_commit(std::function<void()> fn) { commit_hooks.push_back(std::move(fn)); }
     void register_sample(std::function<void()> fn) { sample_hooks.push_back(std::move(fn)); }
@@ -571,8 +571,8 @@ inline void scheduler::spawn(task<> t, std::string name) {
 // -----------------------------------------------------------------------------
 
 /**
- * @brief Committed value with edge derivation, shared by signal, drive,
- *        and observed.
+ * @brief Committed value with edge derivation, shared by signal, model_in,
+ *        and model_out.
  *
  * prev and current shift once per delta round at the update point, so
  * rose()/fell()/changed() hold through exactly the waking round; generation
@@ -634,20 +634,21 @@ private:
 };
 
 /**
- * @brief Staged write bound to a model input; commits before eval.
+ * @brief A model input port: a staged write bound to a model input, committed
+ *        before eval. Named from the model's side - the testbench drives it.
  *
  * Bind a sink functor for packed or wide destinations, or a plain pointer.
- * The sink runs on committed changes, so the model field must start equal
- * to the drive's initial value. The committed value carries the edge API,
- * so processes can wait on the drive itself (e.g. a generated clock).
+ * The sink runs on committed changes, so the model field must start equal to
+ * this port's initial value. The committed value carries the edge API, so
+ * processes can wait on the port itself (e.g. a generated clock).
  */
 template<typename T>
-struct drive : edge_state<T> {
-    drive() = default;
-    drive(scheduler& s, T* ptr) { bind(s, ptr); }
-    drive(const drive&) = delete;
-    drive& operator=(const drive&) = delete;
-    template<typename U> drive& operator=(U&&) = delete;
+struct model_in : edge_state<T> {
+    model_in() = default;
+    model_in(scheduler& s, T* ptr) { bind(s, ptr); }
+    model_in(const model_in&) = delete;
+    model_in& operator=(const model_in&) = delete;
+    template<typename U> model_in& operator=(U&&) = delete;
 
     template<typename Sink>
     void bind(scheduler& s, Sink write) {
@@ -660,7 +661,7 @@ struct drive : edge_state<T> {
         bind(s, [ptr](T v) { *ptr = v; });
     }
 
-    drive& operator<<=(T v) {
+    model_in& operator<<=(T v) {
         sched->guard_staging();
         pending = std::move(v);
         return *this;
@@ -686,17 +687,18 @@ private:
 };
 
 /**
- * @brief Model output sampled once per delta round, after eval.
+ * @brief A model output port: sampled once per delta round, after eval. Named
+ *        from the model's side - the testbench reads it, and cannot write it.
  *
- * Bind a source functor for packed or wide origins, or construct with a
- * plain pointer.
+ * Bind a source functor for packed or wide origins, or construct with a plain
+ * pointer.
  */
 template<typename T>
-struct observed : edge_state<T> {
-    observed() = default;
-    observed(scheduler& s, const T* ptr) { bind(s, ptr); }
-    observed(const observed&) = delete;
-    observed& operator=(const observed&) = delete;
+struct model_out : edge_state<T> {
+    model_out() = default;
+    model_out(scheduler& s, const T* ptr) { bind(s, ptr); }
+    model_out(const model_out&) = delete;
+    model_out& operator=(const model_out&) = delete;
 
     template<typename Source>
     void bind(scheduler& s, Source read) {
@@ -1151,7 +1153,7 @@ void comb(scheduler& s, F body, std::string name = {}) {
 // -----------------------------------------------------------------------------
 //
 // A settled-phase VCD tracer: one file, written live, carrying C++ signals and
-// any model signal surfaced through observed - so a cosim trace holds both
+// any model signal surfaced through model_out - so a cosim trace holds both
 // heads with no post-merge. It samples at settled() (the slot's converged
 // state), so the file shows one value per time slot, not delta transients.
 
@@ -1159,7 +1161,7 @@ void comb(scheduler& s, F body, std::string name = {}) {
  * @brief Unified VCD tracer. Register signals with add() before run(); values
  *        are sampled once per slot in the settled phase and written on change.
  *
- * Traces anything with the port value interface (signal, drive, observed).
+ * Traces anything with the port value interface (signal, model_in, model_out).
  * Widths default to the type size (bool is one bit); pass width for a packed
  * field. Up to 64 bits per signal.
  */

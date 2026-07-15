@@ -27,11 +27,11 @@ struct rig {
     std::unique_ptr<VerilatedContext> ctx;
     std::unique_ptr<Vt1_top> top;
 
-    drive<bool> clk, clk2, f_d, e_req, m_ack;
-    drive<std::uint8_t> e_data;
-    observed<bool> f_q, f_comb, e_ack, m_req;
-    observed<std::uint8_t> e_echo, m_data;
-    observed<std::uint16_t> c1, c2;
+    model_in<bool> clk, clk2, f_d, e_req, m_ack;
+    model_in<std::uint8_t> e_data;
+    model_out<bool> f_q, f_comb, e_ack, m_req;
+    model_out<std::uint8_t> e_echo, m_data;
+    model_out<std::uint16_t> c1, c2;
 
     bool done_flop = false, done_echo = false, done_svm = false, done_clocks = false;
 
@@ -65,7 +65,7 @@ struct rig {
     }
 };
 
-task<> gen_clock(drive<bool>& c, sim_time half) {
+task<> gen_clock(model_in<bool>& c, sim_time half) {
     for (;;) {
         co_await half;
         c <<= !c;

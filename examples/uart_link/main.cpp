@@ -39,9 +39,9 @@ struct rig {
     std::unique_ptr<VerilatedContext> ctx;
     std::unique_ptr<Vuart_tx> top;
 
-    drive<bool> clk, rst, start;
-    drive<std::uint8_t> data;
-    observed<bool> busy, txd;
+    model_in<bool> clk, rst, start;
+    model_in<std::uint8_t> data;
+    model_out<bool> busy, txd;
 
     rig() {
         ctx = std::make_unique<VerilatedContext>();
