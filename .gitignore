@@ -13,6 +13,7 @@ demo/ring
 
 # editor / tooling
 .cache/
+.vscode/
 compile_commands.json
 .clangd
 *.o
@@ -20,3 +21,5 @@ compile_commands.json
 
 # waveform outputs
 *.vcd
+*.fst
+*.fst.hier
