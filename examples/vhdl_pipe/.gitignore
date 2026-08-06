@@ -1,0 +1,10 @@
+# generated netlists, verilated sources, executables, waves
+build/
+
+# clangd database symlink -> build/compile_commands.json
+/compile_commands.json
+
+# advacam proprietary DUTs point the pipe at RTL outside this repo; keep them
+# and their absolute paths out of the tree. The self-contained probe DUT stays.
+duts/queues/
+duts/transactor/
