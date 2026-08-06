@@ -1137,6 +1137,9 @@ edge_trigger<S> falling_edge(S& sig) { return {&sig, detail::edge::fall}; }
 namespace detail {
     template<typename Trig, typename F>
     task<> triggered_process(Trig trig, F body) {
+        static_assert(std::is_void_v<decltype(body())>,
+                      "process body must be synchronous; write an explicit task<> loop "
+                      "for a body that co_awaits");
         for (;;) {
             co_await trig;
             body();
@@ -1145,6 +1148,8 @@ namespace detail {
 
     template<typename F>
     task<> comb_process(F body) {
+        static_assert(std::is_void_v<decltype(body())>,
+                      "comb body must be synchronous - it re-runs to a fixpoint (C5)");
         for (;;) {
             body();
             co_await changed(any);
@@ -1153,19 +1158,23 @@ namespace detail {
 }
 
 /**
- * @brief A triggered process: runs body once each time the trigger fires.
+ * @brief A triggered process: runs a synchronous body once each time the
+ *        trigger fires.
  *
- * process(s, rising_edge(clk), [&]{ q <<= d; }) is the clocked process - body
- * reads committed state and stages the next values.
+ * The trigger is any re-armable awaitable - an edge (rising_edge / falling_edge)
+ * for a clocked process, or a delay for a periodic one. The body reads committed
+ * state and stages the next values; a body that must co_await belongs in an
+ * explicit task<> loop, where its suspends stay visible.
  */
-template<typename S, typename F>
-void process(scheduler& s, edge_trigger<S> trig, F body, std::string name = {}) {
-    s.spawn(detail::triggered_process(trig, std::move(body)), std::move(name));
+template<typename Trig, typename F>
+void process(scheduler& s, Trig trig, F body, std::string name = {}) {
+    s.spawn(detail::triggered_process(std::move(trig), std::move(body)), std::move(name));
 }
 
 /**
- * @brief A concurrent combinational statement: body re-evaluates on any change
- *        and converges by the fixpoint, so it carries no sensitivity list.
+ * @brief A concurrent combinational statement: a synchronous body re-evaluates
+ *        on any change and converges by the fixpoint, so it carries no
+ *        sensitivity list.
  */
 template<typename F>
 void comb(scheduler& s, F body, std::string name = {}) {
